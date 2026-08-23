@@ -166,7 +166,11 @@ jobs:
             LAST_PCT=-1
             export SRC_DUR_INT
             FFMPEG_ERRLOG=/tmp/ffmpeg_err_$ATTEMPT.log
-            timeout -k 30 "$REC_WALL" "${{ env.FFMPEG_STATIC }}" "${FFMPEG_ARGS[@]}" 2>"$FFMPEG_ERRLOG" | \
+            # NOTE: ffmpeg 7.0.2 static (johnvansickle) segfault (exit 139) saat
+            # -progress pipe:1 dibaca lewat pipe + timeout wrapper. Pakai apt
+            # ffmpeg (dari ubuntu repo, stabil) untuk perekaman; static hanya fallback.
+            RECORD_BIN="$(command -v ffmpeg)"
+            timeout -k 30 "$REC_WALL" "$RECORD_BIN" "${FFMPEG_ARGS[@]}" 2>"$FFMPEG_ERRLOG" | \
             while IFS='=' read -r k v; do
               if [ "$k" = "out_time_ms" ]; then
                 ms=${v%.*}
