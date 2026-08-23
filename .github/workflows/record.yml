@@ -166,7 +166,8 @@ jobs:
 
             LAST_PCT=-1
             export SRC_DUR_INT
-            timeout -k 30 "$REC_WALL" "${{ env.FFMPEG_STATIC }}" "${FFMPEG_ARGS[@]}" 2>/dev/null | \
+            FFMPEG_ERRLOG=/tmp/ffmpeg_err_$ATTEMPT.log
+            timeout -k 30 "$REC_WALL" "${{ env.FFMPEG_STATIC }}" "${FFMPEG_ARGS[@]}" 2>"$FFMPEG_ERRLOG" | \
             while IFS='=' read -r k v; do
               if [ "$k" = "out_time_ms" ]; then
                 ms=${v%.*}
@@ -188,6 +189,9 @@ jobs:
 
             ACTUAL_SIZE=$(stat -c%s "$FILE" 2>/dev/null || echo 0)
             echo "exit=$FFMPEG_EXIT size=$ACTUAL_SIZE"
+            echo "--- ffmpeg stderr tail ---"
+            tail -12 "$FFMPEG_ERRLOG" 2>/dev/null || true
+            echo "--------------------------"
 
             if [ "$ACTUAL_SIZE" -ge "$MIN_SIZE" ]; then
               REC_DUR=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$FILE" 2>/dev/null | head -1)
