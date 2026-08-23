@@ -329,7 +329,7 @@ if job_status == "success":
             caption_hevc = (
                 f"🎞 <b>HEVC 10-bit</b>\n\n"
                 f"{id_line()}"
-                f"📦 File: <code>{hevc_file}</code>\n"
+                f"📦 File: <code>{os.path.basename(hevc_file)}</code>\n"
                 f"📏 Size: {hevc_size}\n"
                 f"⏱ Durasi: {hevc_dur}\n"
                 f"🖥 Resolusi: {hevc_res}\n"
