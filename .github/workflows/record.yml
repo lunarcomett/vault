@@ -1,0 +1,363 @@
+name: vault-record
+
+# /record -> rekam di runner GitHub -> cek bitrate/size:
+#   - bitrate <= 1.5 Mbps DAN <= 2GB  -> kirim ORIGINAL langsung ke Telegram (no encode)
+#   - bitrate > 1.5 Mbps ATAU > 2GB   -> encode HEVC 10-bit (~1.3 Mbps) -> kirim hasil HEVC saja
+
+permissions:
+  contents: write
+
+on:
+  repository_dispatch:
+    types: [record-request]
+  workflow_dispatch:
+    inputs:
+      m3u8_url:
+        description: 'Direct .m3u8 URL'
+        required: true
+      duration:
+        description: 'Duration seconds'
+        required: false
+        default: '300'
+      chat_id:
+        description: 'Telegram chat ID'
+        required: true
+      filename:
+        description: 'Output filename (opsional)'
+        required: false
+        default: ''
+      human_duration:
+        description: 'Human readable duration'
+        required: false
+        default: ''
+      hevc_preset:
+        required: false
+        default: 'veryfast'
+      hevc_crf:
+        required: false
+        default: '24'
+      referer:
+        required: false
+        default: ''
+
+jobs:
+  record:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    env:
+      TZ: Asia/Jakarta
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Get inputs
+        id: inputs
+        run: |
+          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            echo "m3u8_url=${{ github.event.client_payload.m3u8_url }}" >> $GITHUB_OUTPUT
+            echo "duration=${{ github.event.client_payload.duration || '300' }}" >> $GITHUB_OUTPUT
+            echo "chat_id=${{ github.event.client_payload.chat_id }}" >> $GITHUB_OUTPUT
+            echo "filename=${{ github.event.client_payload.filename || '' }}" >> $GITHUB_OUTPUT
+            echo "human_duration=${{ github.event.client_payload.human_duration || '' }}" >> $GITHUB_OUTPUT
+            echo "referer=${{ github.event.client_payload.referer || '' }}" >> $GITHUB_OUTPUT
+            echo "hevc_preset=${{ github.event.client_payload.hevc_preset || 'veryfast' }}" >> $GITHUB_OUTPUT
+            echo "hevc_crf=${{ github.event.client_payload.hevc_crf || '24' }}" >> $GITHUB_OUTPUT
+            echo "job_id=${{ github.event.client_payload.job_id || '' }}" >> $GITHUB_OUTPUT
+          else
+            echo "m3u8_url=${{ inputs.m3u8_url }}" >> $GITHUB_OUTPUT
+            echo "duration=${{ inputs.duration }}" >> $GITHUB_OUTPUT
+            echo "chat_id=${{ inputs.chat_id }}" >> $GITHUB_OUTPUT
+            echo "filename=${{ inputs.filename }}" >> $GITHUB_OUTPUT
+            echo "human_duration=${{ inputs.human_duration }}" >> $GITHUB_OUTPUT
+            echo "referer=${{ inputs.referer }}" >> $GITHUB_OUTPUT
+            echo "hevc_preset=${{ inputs.hevc_preset }}" >> $GITHUB_OUTPUT
+            echo "hevc_crf=${{ inputs.hevc_crf }}" >> $GITHUB_OUTPUT
+            echo "job_id=" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Generate filename + notif start
+        id: fname
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHAT_ID: ${{ steps.inputs.outputs.chat_id }}
+          JOB_ID: ${{ steps.inputs.outputs.job_id }}
+        run: |
+          NOW=$(date '+%Y-%m-%d_%H-%M-%S')
+          D="${{ steps.inputs.outputs.duration }}"
+          case "$D" in ''|*[!0-9]*) D=300 ;; esac
+          if [ "$D" -ge 3600 ]; then HM="$((D/3600))h$(((D%3600)/60))m"
+          elif [ "$D" -ge 60 ]; then HM="$((D/60))m"
+          else HM="${D}s"; fi
+          FNAME="${{ steps.inputs.outputs.filename }}"
+          if [ -z "$FNAME" ]; then
+            FNAME="Vault-Record-${NOW}-${HM}.mp4"
+          fi
+          echo "filename=$FNAME" >> $GITHUB_OUTPUT
+          echo "duration_label=$HM" >> $GITHUB_OUTPUT
+          export TG_API_URL="https://api.telegram.org"
+          python3 scripts/send_message.py "🎬 <b>Recording dimulai</b> | 🆔 ${JOB_ID} | ⏱ ${HM} (maks)" 
+
+      - name: Install ffmpeg (apt + static fallback)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg >/dev/null 2>&1 || true
+          FFMPEG_STATIC="$(command -v ffmpeg || true)"
+          if [ -z "$FFMPEG_STATIC" ]; then
+            echo "Tidak ada ffmpeg sama sekali"; exit 1
+          fi
+          UA="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+          for U in \
+            "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz" \
+            "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz" ; do
+            echo "Download static ffmpeg: $U"
+            if curl -fsSL --retry 4 --retry-delay 5 --retry-all-errors -A "$UA" "$U" -o /tmp/ffmpeg.tar.xz \
+               && tar -xf /tmp/ffmpeg.tar.xz -C /tmp 2>/dev/null; then
+              D=$(ls -d /tmp/ffmpeg-*-amd64-static 2>/dev/null | head -1)
+              [ -z "$D" ] && D=$(ls -d /tmp/ffmpeg-master-latest-linux64-gpl 2>/dev/null | head -1)
+              if [ -n "$D" ]; then
+                if [ -x "$D/ffmpeg" ]; then FFMPEG_STATIC="$D/ffmpeg";
+                elif [ -x "$D/bin/ffmpeg" ]; then FFMPEG_STATIC="$D/bin/ffmpeg"; fi
+              fi
+              if [ -x "$FFMPEG_STATIC" ]; then echo "OK static ffmpeg: $FFMPEG_STATIC"; break; fi
+            fi
+          done
+          echo "FFMPEG_STATIC=$FFMPEG_STATIC" >> $GITHUB_ENV
+          "$FFMPEG_STATIC" -version | head -1
+
+      - name: Record stream (ffmpeg -c copy + retry)
+        id: rec
+        run: |
+          set +e
+          FILE="${{ steps.fname.outputs.filename }}"
+          M3U8_URL="${{ steps.inputs.outputs.m3u8_url }}"
+          REFERRER="${{ steps.inputs.outputs.referer }}"
+          SRC_DUR_INT="${{ steps.inputs.outputs.duration }}"
+          case "$SRC_DUR_INT" in ''|*[!0-9]*) SRC_DUR_INT=300 ;; esac
+          [ "$SRC_DUR_INT" -le 0 ] 2>/dev/null && SRC_DUR_INT=300
+          REC_WALL=$(( SRC_DUR_INT + 120 ))
+          MAX_RETRIES=3
+          MIN_SIZE=102400
+          ATTEMPT=1
+          SUCCESS=0
+
+          while [ $ATTEMPT -le $MAX_RETRIES ]; do
+            echo "==========================="
+            echo "Attempt ${ATTEMPT}/${MAX_RETRIES}"
+            rm -f "$FILE"
+
+            CHAT_ID="${{ steps.inputs.outputs.chat_id }}" FILENAME="$FILE" \
+              TG_API_URL="https://api.telegram.org" \
+              BOT_TOKEN="${{ secrets.BOT_TOKEN }}" \
+              PHASE_LABEL=Rekam \
+              PROGRESS_MSG_FILE=/tmp/rec_msg_id \
+              PROGRESS_STATE_FILE=/tmp/rec_state \
+              python3 scripts/progress.py start 2>/dev/null || true
+
+            FFMPEG_ARGS=(-hide_banner -loglevel info
+              -user_agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+              -fflags +genpts -avoid_negative_ts make_zero
+              -protocol_whitelist "file,http,https,tcp,tls,crypto"
+              -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 30
+              -timeout 6000000 -timelimit "$REC_WALL")
+            if [ -n "$REFERRER" ]; then FFMPEG_ARGS+=(-referer "$REFERRER"); fi
+            FFMPEG_ARGS+=(-i "$M3U8_URL" -c copy -movflags +faststart
+              -max_muxing_queue_size 1024 -t "$SRC_DUR_INT" -progress pipe:1 "$FILE")
+
+            LAST_PCT=-1
+            export SRC_DUR_INT
+            timeout -k 30 "$REC_WALL" "${{ env.FFMPEG_STATIC }}" "${FFMPEG_ARGS[@]}" 2>/dev/null | \
+            while IFS='=' read -r k v; do
+              if [ "$k" = "out_time_ms" ]; then
+                ms=${v%.*}
+                [ "$ms" -gt 0 ] 2>/dev/null || continue
+                cur=$(( ms / 1000000 ))
+                pct=$(( (cur * 100) / SRC_DUR_INT )); [ "$pct" -gt 100 ] && pct=100
+                if [ "$pct" != "$LAST_PCT" ]; then
+                  LAST_PCT=$pct
+                  CHAT_ID="${{ steps.inputs.outputs.chat_id }}" FILENAME="$FILE" \
+                    TG_API_URL="https://api.telegram.org" \
+                    BOT_TOKEN="${{ secrets.BOT_TOKEN }}" \
+                    PROGRESS_MSG_FILE=/tmp/rec_msg_id \
+                    PROGRESS_STATE_FILE=/tmp/rec_state \
+                    python3 scripts/progress.py progress "$pct" 2>/dev/null || true
+                fi
+              fi
+            done
+            FFMPEG_EXIT=${PIPESTATUS[0]}
+
+            ACTUAL_SIZE=$(stat -c%s "$FILE" 2>/dev/null || echo 0)
+            echo "exit=$FFMPEG_EXIT size=$ACTUAL_SIZE"
+
+            if [ "$ACTUAL_SIZE" -ge "$MIN_SIZE" ]; then
+              REC_DUR=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$FILE" 2>/dev/null | head -1)
+              REC_DUR_INT=${REC_DUR%.*}; case "$REC_DUR_INT" in ''|*[!0-9]*) REC_DUR_INT=0 ;; esac
+              THRESH=$(( SRC_DUR_INT * 80 / 100 ))
+              if [ "$REC_DUR_INT" -lt "$THRESH" ] && [ "$ATTEMPT" -lt "$MAX_RETRIES" ]; then
+                echo "Kependekan (${REC_DUR_INT}s < ${THRESH}s) - retry."
+                sleep 15; ATTEMPT=$((ATTEMPT+1)); continue
+              fi
+              SUCCESS=1
+              CHAT_ID="${{ steps.inputs.outputs.chat_id }}" FILENAME="$FILE" \
+                TG_API_URL="https://api.telegram.org" BOT_TOKEN="${{ secrets.BOT_TOKEN }}" \
+                PHASE_LABEL=Rekam PROGRESS_MSG_FILE=/tmp/rec_msg_id \
+                python3 scripts/progress.py done 2>/dev/null || true
+              break
+            fi
+
+            CHAT_ID="${{ steps.inputs.outputs.chat_id }}" FILENAME="$FILE" \
+              TG_API_URL="https://api.telegram.org" BOT_TOKEN="${{ secrets.BOT_TOKEN }}" \
+              PHASE_LABEL=Rekam PROGRESS_MSG_FILE=/tmp/rec_msg_id \
+              python3 scripts/progress.py fail 2>/dev/null || true
+            if [ $ATTEMPT -lt $MAX_RETRIES ]; then sleep 15; fi
+            ATTEMPT=$((ATTEMPT+1))
+          done
+
+          if [ "$SUCCESS" -ne 1 ]; then
+            CHAT_ID="${{ steps.inputs.outputs.chat_id }}" TG_API_URL="https://api.telegram.org" \
+              BOT_TOKEN="${{ secrets.BOT_TOKEN }}" \
+              python3 scripts/send_message.py "❌ Recording gagal semua ${MAX_RETRIES} attempt."
+            exit 1
+          fi
+          echo "Recording selesai:"
+          ls -lh "$FILE"
+          echo "ORIG_BYTES=$(stat -c%s "$FILE")" >> $GITHUB_ENV
+
+      - name: Extract metadata + thumbnail original
+        if: success()
+        run: |
+          FILE="${{ steps.fname.outputs.filename }}"
+          THUMB="${FILE%.mp4}.jpg"
+          DUR_RAW=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$FILE" 2>/dev/null | head -1)
+          DUR_INT=${DUR_RAW%.*}; case "$DUR_INT" in ''|*[!0-9]*) DUR_INT=0 ;; esac
+          REAL_DURATION=$(printf '%02d:%02d:%02d' $((DUR_INT/3600)) $(((DUR_INT%3600)/60)) $((DUR_INT%60)))
+          RES=$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0:s=x "$FILE" 2>/dev/null | head -1)
+          VC=$(ffprobe -v error -select_streams v:0 -show_entries stream=codec_name -of default=noprint_wrappers=1:nokey=1 "$FILE" 2>/dev/null | head -1); [ -z "$VC" ] && VC="?"
+          BR=$(ffprobe -v error -show_entries format=bit_rate -of default=noprint_wrappers=1:nokey=1 "$FILE" 2>/dev/null | head -1)
+          case "$BR" in ''|*[!0-9]*) VB="?" ;;
+            *) VB="$(awk "BEGIN{printf \"%.2f Mbps\", ${BR}/1000000}")" ;;
+          esac
+          FS=$(ls -lh "$FILE" | awk '{print $5}')
+          SEEK=1; [ "$DUR_INT" -gt 6 ] && SEEK=$((DUR_INT/2))
+          ffmpeg -hide_banner -loglevel error -y -ss "$SEEK" -i "$FILE" -frames:v 1 -q:v 2 -vf "scale=640:-2" "$THUMB" 2>/dev/null || true
+          HAS_THUMB=0; [ -s "$THUMB" ] && HAS_THUMB=1
+          {
+            echo "REAL_DURATION=$REAL_DURATION"
+            echo "RESOLUTION=${RES:-?}"
+            echo "VCODEC=$VC"
+            echo "VBITRATE=$VB"
+            echo "FILE_SIZE=$FS"
+            echo "THUMB_FILE=$THUMB"
+            echo "HAS_THUMB=$HAS_THUMB"
+            echo "ACT_DURATION_SEC=$DUR_INT"
+          } >> $GITHUB_ENV
+
+      - name: Decide route (direct vs encode by bitrate/size)
+        if: success()
+        run: |
+          FILE="${{ steps.fname.outputs.filename }}"
+          OUT=$(python3 scripts/decide_route.py "$FILE" "${{ steps.inputs.outputs.duration }}")
+          echo "$OUT"
+          while IFS='=' read -r k v; do echo "$k=$v" >> $GITHUB_ENV; done <<< "$OUT"
+
+      - name: Start local Bot API Server (2GB uploads)
+        if: success()
+        continue-on-error: true
+        env:
+          TELEGRAM_API_ID: ${{ secrets.TG_API_ID }}
+          TELEGRAM_API_HASH: ${{ secrets.TG_API_HASH }}
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+        run: |
+          set +e
+          docker rm -f tg-bot-api >/dev/null 2>&1 || true
+          rm -rf /tmp/tg-bot-api && mkdir -p /tmp/tg-bot-api
+          docker run -d --name tg-bot-api -p 8081:8081 \
+            -e TELEGRAM_API_ID="$TELEGRAM_API_ID" \
+            -e TELEGRAM_API_HASH="$TELEGRAM_API_HASH" \
+            -e TELEGRAM_LOCAL=1 \
+            -v /tmp/tg-bot-api:/var/lib/telegram-bot-api \
+            aiogram/telegram-bot-api:latest \
+            --local -m 2097152000 --dir /var/lib/telegram-bot-api --http-port 8081 --verbosity=2
+          for i in $(seq 1 45); do
+            CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:8081/bot${BOT_TOKEN}/getMe" 2>/dev/null)
+            if [ "$CODE" = "200" ]; then echo "Bot API Server ready"; break; fi
+            sleep 2
+          done
+
+      - name: Send ORIGINAL to Telegram (direct route)
+        if: success() && env.ROUTE == 'direct'
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHAT_ID: ${{ steps.inputs.outputs.chat_id }}
+          FILENAME: ${{ steps.fname.outputs.filename }}
+          HUMAN_DUR: ${{ steps.fname.outputs.duration_label }}
+          JOB_ID: ${{ steps.inputs.outputs.job_id }}
+          TAG: ''
+          JOB_STATUS: success
+          REAL_DURATION: ${{ env.REAL_DURATION }}
+          RESOLUTION: ${{ env.RESOLUTION }}
+          VCODEC: ${{ env.VCODEC }}
+          VBITRATE: ${{ env.VBITRATE }}
+          FILE_SIZE: ${{ env.FILE_SIZE }}
+          ORIG_BYTES: ${{ env.ORIG_BYTES }}
+          THUMB_FILE: ${{ env.THUMB_FILE }}
+          HAS_THUMB: ${{ env.HAS_THUMB }}
+          TG_API_URL: 'http://localhost:8081'
+          ORV_ID: ${{ steps.inputs.outputs.job_id }}
+          PHASE: original
+          NOTIFY_HEVC_ETA: '0'
+        run: |
+          python3 scripts/notify.py
+          echo "DIRECT_SENT=1" >> $GITHUB_ENV
+
+      - name: Upload ORIGINAL to temp release + trigger transcode (encode route)
+        if: success() && env.ROUTE == 'encode'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHAT_ID: ${{ steps.inputs.outputs.chat_id }}
+          FILENAME: ${{ steps.fname.outputs.filename }}
+          HUMAN_DUR: ${{ steps.fname.outputs.duration_label }}
+          JOB_ID: ${{ steps.inputs.outputs.job_id }}
+        run: |
+          set -e
+          FILE="${{ steps.fname.outputs.filename }}"
+          TAG="encode-src-${{ github.run_id }}"
+          gh release create "$TAG" --repo "${{ github.repository }}" \
+            --title "Encode source ${GITHUB_RUN_ID}" \
+            --notes "Temp encode source - dihapus otomatis setelah transcode selesai."
+          gh release upload "$TAG" --repo "${{ github.repository }}" "./$FILE" --clobber \
+            || { echo "gagal upload original"; exit 1; }
+          echo "Original terupload ke release $TAG - trigger transcode..."
+          CHAT_ID="$CHAT_ID" TG_API_URL="https://api.telegram.org" BOT_TOKEN="${{ secrets.BOT_TOKEN }}" \
+            python3 scripts/send_message.py "🎚 <b>Bitrate tinggi terdeteksi</b> (${{ env.REASON }}). Encode HEVC dimulai, hasil dikirim otomatis."
+          gh api repos/${{ github.repository }}/dispatches \
+            -f event_type=transcode-request \
+            -f "client_payload[filename]=${FILE}" \
+            -f "client_payload[chat_id]=${CHAT_ID}" \
+            -f "client_payload[human_duration]=${HUMAN_DUR}" \
+            -f "client_payload[duration]=${ACT_DURATION_SEC}" \
+            -f "client_payload[release_tag]=${TAG}" \
+            -f "client_payload[hevc_preset]=${{ steps.inputs.outputs.hevc_preset }}" \
+            -f "client_payload[hevc_crf]=${{ steps.inputs.outputs.hevc_crf }}" \
+            -f "client_payload[encode_profile]=live" \
+            -f "client_payload[job_id]=${JOB_ID}"
+          echo "ENCODE_DISPATCHED=1" >> $GITHUB_ENV
+
+      - name: Cleanup temp release on dispatch failure
+        if: failure() && env.ROUTE == 'encode'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="encode-src-${{ github.run_id }}"
+          gh release delete "$TAG" --repo "${{ github.repository }}" --yes --cleanup-tag 2>/dev/null || true
+          echo "Temp release dibersihkan (dispatch gagal)."
+
+      - name: Ringkasan akhir
+        if: always()
+        run: |
+          echo "=== RINGKASAN ==="
+          echo "Route     : ${ROUTE:-?} (${REASON:-?})"
+          echo "Size      : ${FILE_SIZE:-?}"
+          echo "Durasi    : ${REAL_DURATION:-?}"
+          echo "Direct    : ${DIRECT_SENT:-0}"
+          echo "Encode    : ${ENCODE_DISPATCHED:-0}"
