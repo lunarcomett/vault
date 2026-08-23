@@ -1,0 +1,331 @@
+name: vault-transcode
+
+# Encode HEVC untuk file di temp release:
+#   - dipicu record.yml (bitrate > 1.5 Mbps atau > 2GB) -> kirim HEVC saja
+#   - dipicu cocote_bot /trans7 lokal (file besar/bitrate tinggi dari RDP)
+# Setelah selesai: kirim hasil ke Telegram + HAPUS temp release.
+
+permissions:
+  contents: write
+
+on:
+  repository_dispatch:
+    types: [transcode-request]
+  workflow_dispatch:
+    inputs:
+      filename:
+        required: true
+      chat_id:
+        required: true
+      release_tag:
+        required: true
+      duration:
+        required: true
+      human_duration:
+        required: false
+        default: ''
+      hevc_preset:
+        required: false
+        default: 'veryfast'
+      hevc_crf:
+        required: false
+        default: '24'
+      job_id:
+        required: false
+        default: ''
+
+jobs:
+  transcode:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    env:
+      TZ: Asia/Jakarta
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Get inputs
+        id: inputs
+        run: |
+          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            echo "filename=${{ github.event.client_payload.filename }}" >> $GITHUB_OUTPUT
+            echo "chat_id=${{ github.event.client_payload.chat_id }}" >> $GITHUB_OUTPUT
+            echo "human_duration=${{ github.event.client_payload.human_duration || '' }}" >> $GITHUB_OUTPUT
+            echo "duration=${{ github.event.client_payload.duration }}" >> $GITHUB_OUTPUT
+            echo "release_tag=${{ github.event.client_payload.release_tag }}" >> $GITHUB_OUTPUT
+            echo "hevc_preset=${{ github.event.client_payload.hevc_preset || 'veryfast' }}" >> $GITHUB_OUTPUT
+            echo "hevc_crf=${{ github.event.client_payload.hevc_crf || '24' }}" >> $GITHUB_OUTPUT
+            echo "job_id=${{ github.event.client_payload.job_id || '' }}" >> $GITHUB_OUTPUT
+          else
+            echo "filename=${{ inputs.filename }}" >> $GITHUB_OUTPUT
+            echo "chat_id=${{ inputs.chat_id }}" >> $GITHUB_OUTPUT
+            echo "human_duration=${{ inputs.human_duration }}" >> $GITHUB_OUTPUT
+            echo "duration=${{ inputs.duration }}" >> $GITHUB_OUTPUT
+            echo "release_tag=${{ inputs.release_tag }}" >> $GITHUB_OUTPUT
+            echo "hevc_preset=${{ inputs.hevc_preset }}" >> $GITHUB_OUTPUT
+            echo "hevc_crf=${{ inputs.hevc_crf }}" >> $GITHUB_OUTPUT
+            echo "job_id=${{ inputs.job_id }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Install ffmpeg (apt + static fallback)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg >/dev/null 2>&1 || true
+          FFMPEG_STATIC="$(command -v ffmpeg || true)"
+          if [ -z "$FFMPEG_STATIC" ]; then echo "no ffmpeg"; exit 1; fi
+          UA="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+          for U in \
+            "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz" \
+            "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz" ; do
+            if curl -fsSL --retry 4 --retry-delay 5 --retry-all-errors -A "$UA" "$U" -o /tmp/ffmpeg.tar.xz \
+               && tar -xf /tmp/ffmpeg.tar.xz -C /tmp 2>/dev/null; then
+              D=$(ls -d /tmp/ffmpeg-*-amd64-static 2>/dev/null | head -1)
+              [ -z "$D" ] && D=$(ls -d /tmp/ffmpeg-master-latest-linux64-gpl 2>/dev/null | head -1)
+              if [ -n "$D" ]; then
+                if [ -x "$D/ffmpeg" ]; then FFMPEG_STATIC="$D/ffmpeg";
+                elif [ -x "$D/bin/ffmpeg" ]; then FFMPEG_STATIC="$D/bin/ffmpeg"; fi
+              fi
+              if [ -x "$FFMPEG_STATIC" ]; then break; fi
+            fi
+          done
+          echo "FFMPEG_STATIC=$FFMPEG_STATIC" >> $GITHUB_ENV
+          "$FFMPEG_STATIC" -version | head -1
+
+      - name: Download ORIGINAL dari temp release
+        id: dl
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ steps.inputs.outputs.release_tag }}"
+          RAW="${{ steps.inputs.outputs.filename }}"
+          echo "Download original dari release: $TAG / $RAW"
+          mkdir -p /tmp/vault_dl
+          API_URL="repos/${{ github.repository }}/releases/tags/$TAG"
+          ASSET_IDS=$(gh api "$API_URL" --jq '.assets[].id')
+          if [ -z "$ASSET_IDS" ]; then
+            echo "Release temp tidak punya asset!"; exit 1
+          fi
+          for aid in $ASSET_IDS; do
+            fname=$(gh api "repos/${{ github.repository }}/releases/assets/$aid" --jq '.name')
+            echo "  download $fname"
+            gh api "repos/${{ github.repository }}/releases/assets/$aid" \
+              -H "Accept: application/octet-stream" > "/tmp/vault_dl/$fname"
+            echo "  -> $(stat -c%s "/tmp/vault_dl/$fname") bytes"
+          done
+          if ls /tmp/vault_dl/part-* >/dev/null 2>&1; then
+            echo "Re-assemble part..."
+            cat $(ls /tmp/vault_dl/part-* | sort) > "/tmp/vault_dl/$RAW"
+          fi
+          if [ -s "/tmp/vault_dl/$RAW" ]; then
+            echo "ORIG_FILE=/tmp/vault_dl/$RAW" >> $GITHUB_OUTPUT
+            echo "Original siap: $(ls -lh /tmp/vault_dl/$RAW | awk '{print $5}')"
+          else
+            echo "Original gagal didownload"; exit 1
+          fi
+
+      - name: Notif encode mulai
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHAT_ID: ${{ steps.inputs.outputs.chat_id }}
+        run: |
+          export TG_API_URL="https://api.telegram.org"
+          SZ=$(ls -lh "${{ steps.dl.outputs.ORIG_FILE }}" | awk '{print $5}')
+          python3 scripts/send_message.py "⏳ <b>Encode HEVC dimulai</b> | 📦 $SZ | 🎚 ${{ steps.inputs.outputs.hevc_preset }} CRF ${{ steps.inputs.outputs.hevc_crf }}"
+
+      - name: Auto-downgrade preset (sample 60s riil)
+        id: autodg
+        run: |
+          ORIG="${{ steps.dl.outputs.ORIG_FILE }}"
+          PRESET="${{ steps.inputs.outputs.hevc_preset || 'veryfast' }}"
+          CRF_VAL="${{ steps.inputs.outputs.hevc_crf || '24' }}"
+          DUR="${{ steps.inputs.outputs.duration }}"
+          case "$DUR" in ''|*[!0-9]*) DUR=0 ;; esac
+          if [ "$DUR" -le 0 ] 2>/dev/null; then DUR=3600; fi
+          LIMIT_MIN=320
+          OVERHEAD_MIN=15
+          FFMPEG_STATIC="${{ env.FFMPEG_STATIC }}"
+
+          VFPS=$(ffprobe -v error -select_streams v:0 -show_entries stream=avg_frame_rate -of default=noprint_wrappers=1:nokey=1 "$ORIG" 2>/dev/null | head -1)
+          VFPS_NUM=$(awk -F/ '{if(NF==2) printf "%.2f", $1/$2; else printf "%.2f", $1}' <<<"$VFPS" 2>/dev/null || echo 30)
+          if [ -z "$VFPS_NUM" ]; then VFPS_NUM=30; fi
+          if [ "$VFPS_NUM" = "0.00" ]; then VFPS_NUM=30; fi
+          echo "FPS video asli: $VFPS_NUM"
+
+          echo "Sampling 60s encode dgn preset '$PRESET' (CRF $CRF_VAL)..."
+          SAMPLE_OUT="/tmp/vault_sample.mkv"
+          timeout 90 "$FFMPEG_STATIC" -hide_banner -y -ss 0 -i "$ORIG" -t 60 \
+            -c:v libx265 -profile:v main10 -pix_fmt yuv420p10le \
+            -crf "$CRF_VAL" -preset "$PRESET" -tag:v hvc1 \
+            -an -progress pipe:1 "$SAMPLE_OUT" 2>/dev/null \
+            | awk -F= '/^fps=/{v=$2} END{ if(v!="") print v }' > /tmp/vault_fps.txt
+          SAMPLE_FPS=$(cat /tmp/vault_fps.txt 2>/dev/null | head -1)
+          rm -f "$SAMPLE_OUT" 2>/dev/null || true
+          if [ -n "$SAMPLE_FPS" ] && ! awk "BEGIN{exit !($SAMPLE_FPS<=0)}"; then
+            true
+          else
+            SAMPLE_FPS=""
+          fi
+          echo "FPS sample (${PRESET}): ${SAMPLE_FPS:-?}"
+
+          declare -A LADDER_IDX=( [ultrafast]=0 [superfast]=1 [veryfast]=2 [faster]=3 [fast]=4 [medium]=5 [slow]=6 [slower]=7 [veryslow]=8 [placebo]=9 )
+          declare -A RT=( [ultrafast]=20 [superfast]=12 [veryfast]=6 [faster]=4 [fast]=3 [medium]=1.0 [slow]=0.7 [slower]=0.45 [veryslow]=0.25 [placebo]=0.1 )
+          USER_IDX=${LADDER_IDX[$PRESET]:-2}
+          USER_RT=${RT[$PRESET]:-6}
+
+          if [ -n "$SAMPLE_FPS" ] && [ "$SAMPLE_FPS" != "0" ]; then
+            BASE_RT=$(awk "BEGIN{printf \"%.4f\", $SAMPLE_FPS / $VFPS_NUM}")
+          else
+            BASE_RT=$USER_RT
+            echo "fallback realtime_x=$BASE_RT (tabel)"
+          fi
+          echo "realtime_x dasar (${PRESET}): ${BASE_RT}x"
+
+          user_est=$(awk "BEGIN{printf \"%d\", ($DUR/60 / $BASE_RT) + $OVERHEAD_MIN}")
+          echo "Preset user '$PRESET': est ${user_est}m (limit ${LIMIT_MIN}m)"
+
+          FINAL="$PRESET"
+          FINAL_CRF="$CRF_VAL"
+          if [ "$user_est" -le "$LIMIT_MIN" ]; then
+            echo "Preset user MUAT."
+          else
+            for p in ultrafast superfast veryfast faster fast medium slow slower veryslow; do
+              idx=${LADDER_IDX[$p]}
+              if [ "$idx" -gt "$USER_IDX" ]; then continue; fi
+              prt=${RT[$p]}
+              rtp=$(awk "BEGIN{printf \"%.4f\", $BASE_RT * ($prt / $USER_RT)}")
+              est=$(awk "BEGIN{printf \"%d\", ($DUR/60 / $rtp) + $OVERHEAD_MIN}")
+              echo "  - $p: ${rtp}x -> est ${est}m"
+              if [ "$est" -le "$LIMIT_MIN" ]; then
+                FINAL="$p"
+                echo "Pilih: $p"
+                break
+              fi
+            done
+            if [ "$FINAL" = "$PRESET" ]; then
+              FINAL="ultrafast"
+              echo "Tidak ada yang muat - fallback ultrafast"
+            fi
+          fi
+          echo "FINAL_PRESET=$FINAL" >> $GITHUB_OUTPUT
+          echo "FINAL_CRF=$FINAL_CRF" >> $GITHUB_OUTPUT
+
+      - name: Disk watchdog
+        continue-on-error: false
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHAT_ID: ${{ steps.inputs.outputs.chat_id }}
+        run: |
+          USE=$(df -h /tmp | awk 'NR==2{gsub("%","",$5); print $5}')
+          echo "Disk /tmp: ${USE}% terpakai"
+          if [ "${USE:-0}" -ge 85 ]; then
+            export TG_API_URL="https://api.telegram.org"
+            CHAT_ID="$CHAT_ID" python3 scripts/send_message.py "🚨 Disk runner ${USE}% - transcode dibatalkan otomatis." || true
+            gh api repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/cancel -X POST || true
+            exit 1
+          fi
+
+      - name: Encode to HEVC 10-bit
+        id: hevc
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHAT_ID: ${{ steps.inputs.outputs.chat_id }}
+          FILENAME: ${{ steps.inputs.outputs.filename }}
+          DURATION_SEC: ${{ steps.inputs.outputs.duration }}
+          TG_API_URL: 'https://api.telegram.org'
+          ORIG_FILE: ${{ steps.dl.outputs.ORIG_FILE }}
+          FFMPEG_STATIC: ${{ env.FFMPEG_STATIC }}
+          HEVC_PRESET: ${{ steps.autodg.outputs.FINAL_PRESET || 'veryfast' }}
+          HEVC_CRF: ${{ steps.autodg.outputs.FINAL_CRF || '24' }}
+          CHOSEN_PRESET: ${{ steps.inputs.outputs.hevc_preset || 'veryfast' }}
+          ENCODE_PROFILE: live
+          REQUESTED_DURATION: ${{ steps.inputs.outputs.duration }}
+        run: bash scripts/run_hevc_encode.sh
+
+      - name: Split HEVC jika lebih dari 2GB
+        if: always()
+        continue-on-error: true
+        run: |
+          HF="${{ env.HEVC_FILE }}"
+          SPLIT=0
+          if [ -n "$HF" ] && [ -s "$HF" ]; then
+            SIZE=$(stat -c%s "$HF")
+            MAX=$((2*1024*1024*1024))
+            if [ "$SIZE" -gt "$MAX" ]; then
+              echo "HEVC lebih dari 2GB -> split 1990M"
+              split -b 1990M --numeric-suffixes=0 --suffix-length=3 "$HF" "${HF}.part-"
+              rm -f "$HF"
+              SPLIT=1
+            fi
+          fi
+          echo "HEVC_SPLIT=$SPLIT" >> $GITHUB_ENV
+
+      - name: Start local Bot API Server (2GB)
+        if: always()
+        continue-on-error: true
+        env:
+          TELEGRAM_API_ID: ${{ secrets.TG_API_ID }}
+          TELEGRAM_API_HASH: ${{ secrets.TG_API_HASH }}
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+        run: |
+          set +e
+          docker rm -f tg-bot-api >/dev/null 2>&1 || true
+          rm -rf /tmp/tg-bot-api && mkdir -p /tmp/tg-bot-api
+          docker run -d --name tg-bot-api -p 8081:8081 \
+            -e TELEGRAM_API_ID="$TELEGRAM_API_ID" \
+            -e TELEGRAM_API_HASH="$TELEGRAM_API_HASH" \
+            -e TELEGRAM_LOCAL=1 \
+            -v /tmp/tg-bot-api:/var/lib/telegram-bot-api \
+            aiogram/telegram-bot-api:latest \
+            --local -m 2097152000 --dir /var/lib/telegram-bot-api --http-port 8081 --verbosity=2
+          for i in $(seq 1 45); do
+            CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:8081/bot${BOT_TOKEN}/getMe" 2>/dev/null)
+            if [ "$CODE" = "200" ]; then echo "Bot API Server ready"; break; fi
+            sleep 2
+          done
+
+      - name: Notify Telegram — hasil HEVC
+        if: always()
+        continue-on-error: true
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHAT_ID: ${{ steps.inputs.outputs.chat_id }}
+          FILENAME: ${{ steps.inputs.outputs.filename }}
+          HUMAN_DUR: ${{ steps.inputs.outputs.human_duration }}
+          JOB_ID: ${{ steps.inputs.outputs.job_id }}
+          JOB_STATUS: ${{ job.status }}
+          HEVC_FILE: ${{ env.HEVC_FILE }}
+          HEVC_SIZE: ${{ env.HEVC_SIZE }}
+          HEVC_RES: ${{ env.HEVC_RES }}
+          HEVC_VCODEC: ${{ env.HEVC_VCODEC }}
+          HEVC_VBITRATE: ${{ env.HEVC_VBITRATE }}
+          HEVC_DUR: ${{ env.HEVC_DUR }}
+          HEVC_THUMB_FILE: ${{ env.HEVC_THUMB_FILE }}
+          HAS_HEVC_THUMB: ${{ env.HAS_HEVC_THUMB }}
+          HEVC_SPLIT: ${{ env.HEVC_SPLIT }}
+          CHAPTERS_TEXT: ${{ env.CHAPTERS_TEXT }}
+          FAIL_REASON: ${{ env.FAIL_REASON }}
+          REAL_DURATION: ${{ env.ACT_DURATION_SEC }}
+          RESOLUTION: ''
+          VCODEC: ''
+          VBITRATE: ''
+          FILE_SIZE: ''
+          THUMB_FILE: ''
+          HAS_THUMB: '0'
+          ORIG_BYTES: '0'
+          TAG: ''
+          TG_API_URL: 'http://localhost:8081'
+          ORV_ID: ${{ steps.inputs.outputs.job_id }}
+          PHASE: hevc
+          NOTIFY_HEVC_ETA: '0'
+        run: python3 scripts/notify.py
+
+      - name: Hapus temp release
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ steps.inputs.outputs.release_tag }}"
+          gh release delete "$TAG" --repo "${{ github.repository }}" --yes --cleanup-tag 2>/dev/null \
+            && echo "Temp release $TAG dihapus" || echo "Temp release $TAG sudah tidak ada"
