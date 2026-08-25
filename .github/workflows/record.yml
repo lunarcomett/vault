@@ -182,6 +182,7 @@ jobs:
                   CHAT_ID="${{ steps.inputs.outputs.chat_id }}" FILENAME="$FILE" \
                     TG_API_URL="https://api.telegram.org" \
                     BOT_TOKEN="${{ secrets.BOT_TOKEN }}" \
+                    PHASE_LABEL=Rekam \
                     PROGRESS_MSG_FILE=/tmp/rec_msg_id \
                     PROGRESS_STATE_FILE=/tmp/rec_state \
                     python3 scripts/progress.py progress "$pct" 2>/dev/null || true
