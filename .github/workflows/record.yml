@@ -332,8 +332,25 @@ jobs:
           gh release create "$TAG" --repo "${{ github.repository }}" \
             --title "Encode source ${GITHUB_RUN_ID}" \
             --notes "Temp encode source - dihapus otomatis setelah transcode selesai."
-          gh release upload "$TAG" --repo "${{ github.repository }}" "./$FILE" --clobber \
-            || { echo "gagal upload original"; exit 1; }
+          # GitHub limit: 1 asset max 2GB (2147483648 byte). File >1.9GB di-split
+          # jadi part @1900MB; transcode.yml re-assemble otomatis (cat part-*).
+          SIZE=$(stat -c%s "./$FILE")
+          if [ "$SIZE" -gt 1992294400 ]; then
+            echo "File $((SIZE/1024/1024))MB > 1900MB -> split sebelum upload"
+            split -b 1900M --numeric-suffixes=0 --suffix-length=3 "./$FILE" "/tmp/${FILE}.part-"
+            UPLOAD_FILES=""
+            for P in /tmp/${FILE}.part-*; do
+              [ -f "$P" ] || continue
+              echo "  upload $(basename "$P") : $(stat -c%s "$P") bytes"
+              gh release upload "$TAG" --repo "${{ github.repository }}" "$P" --clobber \
+                || { echo "gagal upload part $(basename "$P")"; exit 1; }
+              rm -f "$P"
+            done
+            rm -f "./$FILE"
+          else
+            gh release upload "$TAG" --repo "${{ github.repository }}" "./$FILE" --clobber \
+              || { echo "gagal upload original"; exit 1; }
+          fi
           echo "Original terupload ke release $TAG - trigger transcode..."
           CHAT_ID="$CHAT_ID" TG_API_URL="https://api.telegram.org" BOT_TOKEN="${{ secrets.BOT_TOKEN }}" \
             python3 scripts/send_message.py "🎚 <b>Bitrate tinggi terdeteksi</b> (${{ env.REASON }}). Encode HEVC dimulai, hasil dikirim otomatis."
