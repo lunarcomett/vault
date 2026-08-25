@@ -108,10 +108,18 @@ jobs:
           fi
           for aid in $ASSET_IDS; do
             fname=$(gh api "repos/${{ github.repository }}/releases/assets/$aid" --jq '.name')
+            # Strip ".part-NNN" supaya cat part-* cocok: file.mp4.part-000 -> file.mp4.part-000 tetap,
+            # tapi simpan dengan nama yang di-strip agar glob part-* dan RAW konsisten.
             echo "  download $fname"
             gh api "repos/${{ github.repository }}/releases/assets/$aid" \
               -H "Accept: application/octet-stream" > "/tmp/vault_dl/$fname"
             echo "  -> $(stat -c%s "/tmp/vault_dl/$fname") bytes"
+          done
+          # Nama asset dari split = "<RAW>.part-000" (mengandung .mp4 sebelum .part).
+          # Glob "part-*" tidak match "xxx.mp4.part-000", jadi normalisasi dulu:
+          for F in /tmp/vault_dl/*.part-*; do
+            [ -f "$F" ] || continue
+            mv "$F" "/tmp/vault_dl/part-$(basename "$F" | sed 's/.*\.part-//')"
           done
           if ls /tmp/vault_dl/part-* >/dev/null 2>&1; then
             echo "Re-assemble part..."
