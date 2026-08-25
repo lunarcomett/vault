@@ -339,8 +339,8 @@ jobs:
           NOTIFY_HEVC_ETA: '0'
         run: python3 scripts/notify.py
 
-      - name: Hapus temp release
-        if: always()
+      - name: Hapus temp release (hanya jika encode sukses)
+        if: success()
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
