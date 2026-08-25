@@ -118,6 +118,16 @@ jobs:
             cat $(ls /tmp/vault_dl/part-* | sort) > "/tmp/vault_dl/$RAW"
           fi
           if [ -s "/tmp/vault_dl/$RAW" ]; then
+            # Verifikasi integritas: total part harus sama dgn ukuran hasil gabung
+            if ls /tmp/vault_dl/part-* >/dev/null 2>&1; then
+              SUM_PARTS=$(cat $(ls /tmp/vault_dl/part-* | sort) | wc -c)
+              ASM_SIZE=$(stat -c%s "/tmp/vault_dl/$RAW")
+              if [ "$SUM_PARTS" -ne "$ASM_SIZE" ]; then
+                echo "CORRUPT: total part ($SUM_PARTS) != hasil gabung ($ASM_SIZE)"; exit 1
+              fi
+              rm -f /tmp/vault_dl/part-*
+              echo "Integritas OK: $ASM_SIZE bytes"
+            fi
             echo "ORIG_FILE=/tmp/vault_dl/$RAW" >> $GITHUB_OUTPUT
             echo "Original siap: $(ls -lh /tmp/vault_dl/$RAW | awk '{print $5}')"
           else
