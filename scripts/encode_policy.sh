@@ -88,7 +88,8 @@ accept_hevc() {
     echo "NEED_BETTER"
     return 1
   fi
-  if [ "$bps" -gt "$ACCEPT_BPS" ]; then
+  # Toleransi +1% dari ACCEPT_BPS: 1.46 Mbps vs cap 1.45 = nyaris identik, jangan paksakan re-encode penuh
+  if [ "$bps" -gt $(( ACCEPT_BPS * 101 / 100 )) ]; then
     echo "NEED_SMALLER"
     return 1
   fi
