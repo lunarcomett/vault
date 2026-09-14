@@ -362,6 +362,17 @@ if [ -s "$HEVC_FILE" ]; then
         "Auto-size: gagal baca bitrate HEVC — encode dihentikan." || true
       exit 1
     fi
+    # === TIME-BUDGET GUARD: re-encode penuh butuh ~durasi pass pertama lagi.
+    # Runner hard-limit 6j; step ini 350m. Kalau pass1 sudah makan >2j40m ATAU
+    # sudah pernah retry, hasil sekarang dipakai apa adanya (soft) daripada
+    # tamat kena timeout GH dan SEMUA hasil terbuang.
+    EL_NOW=$(( SECONDS - ENC_START ))
+    if [ "$EL_NOW" -gt 9600 ] || [ "$try" -ge 1 ]; then
+      CHAT_ID="$CHAT_ID" TG_API_URL="$TG_API_URL" BOT_TOKEN="$BOT_TOKEN" python3 scripts/send_message.py \
+        "⏱️ Budget waktu tinggal sedikit (pass1=$((EL_NOW/60))m) — hasil CRF $CUR_CRF ($(numfmt --to=iec ${HEVC_BYTES:-0})) dipakai apa adanya, skip re-encode." || true
+      echo "budget guard: break (EL=${EL_NOW}s try=$try)"
+      break
+    fi
     if [ "$DECISION" = "NEED_BETTER" ]; then
       NEXT_CRF=$((CUR_CRF - 2))
       [ "$NEXT_CRF" -lt "${MIN_CRF:-22}" ] && NEXT_CRF=${MIN_CRF:-22}
