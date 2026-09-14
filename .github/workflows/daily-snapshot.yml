@@ -1,0 +1,68 @@
+name: daily-snapshot
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+    inputs:
+      playlist_url:
+        description: "URL playlist snapshot (.txt)"
+        required: false
+        default: "https://raw.githubusercontent.com/FakeAdsCollection/test/refs/heads/main/s.txt"
+
+concurrency:
+  group: daily-snapshot
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      BOT_TOKEN: "{{ secrets.BOT_TOKEN }}"
+      CHAT_ID: "{{ github.event.inputs.chat_id || '2027652715' }}"
+      PLAYLIST_URL: "{{ github.event.inputs.playlist_url || 'https://raw.githubusercontent.com/FakeAdsCollection/test/refs/heads/main/s.txt' }}"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ffmpeg
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg >/dev/null 2>&1 || true
+          ffmpeg -version | head -1
+
+      - name: Start local Bot API Server (2GB uploads)
+        continue-on-error: true
+        env:
+          TELEGRAM_API_ID: "{{ secrets.TG_API_ID }}"
+          TELEGRAM_API_HASH: "{{ secrets.TG_API_HASH }}"
+        run: |
+          set +e
+          docker rm -f tg-bot-api >/dev/null 2>&1 || true
+          rm -rf /tmp/tg-bot-api && mkdir -p /tmp/tg-bot-api
+          docker run -d --name tg-bot-api -p 8081:8081 \
+            -e TELEGRAM_API_ID="$TELEGRAM_API_ID" \
+            -e TELEGRAM_API_HASH="$TELEGRAM_API_HASH" \
+            -e TELEGRAM_LOCAL=1 \
+            -v /tmp/tg-bot-api:/var/lib/telegram-bot-api \
+            aiogram/telegram-bot-api:latest \
+            --local -m 2097152000 --dir /var/lib/telegram-bot-api --http-port 8081 --verbosity=2
+          for i in $(seq 1 45); do
+            CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:8081/bot$BOT_TOKEN/getMe" 2>/dev/null)
+            if [ "$CODE" = "200" ]; then echo "Bot API Server ready"; break; fi
+            sleep 2
+          done
+
+      - name: Run snapshot recovery
+        env:
+          TG_API_URL: "http://localhost:8081"
+        run: python3 scripts/daily_snapshot.py
+
+      - name: Notify on failure
+        if: failure()
+        env:
+          TG_API_URL: "https://api.telegram.org"
+        run: |
+          python3 scripts/send_message.py "Daily snapshot workflow gagal. Cek: "{{ github.server_url }}"/"{{ github.repository }}"/actions/runs/"{{ github.run_id }}"" || true
