@@ -21,9 +21,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
-      BOT_TOKEN: "{{ secrets.BOT_TOKEN }}"
-      CHAT_ID: "{{ github.event.inputs.chat_id || '2027652715' }}"
-      PLAYLIST_URL: "{{ github.event.inputs.playlist_url || 'https://raw.githubusercontent.com/FakeAdsCollection/test/refs/heads/main/s.txt' }}"
+      BOT_TOKEN: "${{ secrets.BOT_TOKEN }}"
+      CHAT_ID: "${{ github.event.inputs.chat_id || '2027652715' }}"
+      PLAYLIST_URL: "${{ github.event.inputs.playlist_url || 'https://raw.githubusercontent.com/FakeAdsCollection/test/refs/heads/main/s.txt' }}"
     steps:
       - uses: actions/checkout@v4
 
@@ -36,8 +36,8 @@ jobs:
       - name: Start local Bot API Server (2GB uploads)
         continue-on-error: true
         env:
-          TELEGRAM_API_ID: "{{ secrets.TG_API_ID }}"
-          TELEGRAM_API_HASH: "{{ secrets.TG_API_HASH }}"
+          TELEGRAM_API_ID: "${{ secrets.TG_API_ID }}"
+          TELEGRAM_API_HASH: "${{ secrets.TG_API_HASH }}"
         run: |
           set +e
           docker rm -f tg-bot-api >/dev/null 2>&1 || true
@@ -65,4 +65,4 @@ jobs:
         env:
           TG_API_URL: "https://api.telegram.org"
         run: |
-          python3 scripts/send_message.py "Daily snapshot workflow gagal. Cek: "{{ github.server_url }}"/"{{ github.repository }}"/actions/runs/"{{ github.run_id }}"" || true
+          python3 scripts/send_message.py "Daily snapshot workflow gagal. Cek: "${{ github.server_url }}"/"${{ github.repository }}"/actions/runs/"${{ github.run_id }}"" || true
