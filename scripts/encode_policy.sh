@@ -94,8 +94,8 @@ accept_hevc() {
     return 1
   fi
   if [ "$target" -gt 0 ] && [ "$bytes" -gt "$target" ]; then
-    # size over but bitrate OK: soft OK if bps within cap (container overhead)
-    if [ "$bps" -le "$MAX_TOTAL_BPS" ]; then
+    # size over but bitrate OK: soft OK if bps within cap +1% (container overhead)
+    if [ "$bps" -le $(( MAX_TOTAL_BPS * 101 / 100 )) ]; then
       echo "OK"
       return 0
     fi
