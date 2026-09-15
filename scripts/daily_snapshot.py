@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Daily Trans7 snapshot recovery (GitHub Actions runner).
+"""Daily live-stream snapshot recovery (GitHub Actions runner).
 
 Ambil file playlist snapshot (baris `file 'https://.../stream-720-<ts>.ts'`),
 download semua segmen yang masih hidup di CDN, concat -c copy -> MP4,
@@ -123,7 +123,7 @@ def main():
             f.write(f"file '{os.path.join(SEG_DIR, s)}'\n")
 
     d0 = datetime.fromtimestamp(t0, WIB)
-    fname = f"Trans7_{d0.strftime('%A, %d %B %Y')}_{d0.strftime('%H-%M')}.mp4"
+    fname = f"Rekaman_{d0.strftime('%A, %d %B %Y')}_{d0.strftime('%H-%M')}.mp4"
     out = os.path.join(OUT_DIR, fname)
     log(f"concat {len(segs)} segmen -> {fname}")
     r = os.system(f"ffmpeg -y -hide_banner -loglevel error -f concat -safe 0 -i '{listfile}' -c copy '{out}'")
