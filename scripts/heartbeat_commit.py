@@ -1,57 +1,63 @@
-# --- heartbeat_commit.py (reusable snippet) ---
 #!/usr/bin/env python3
-"""Push commit dummy ke branch `heartbeat` di repo ini supaya repo dianggap aktif.
-GitHub men-disable schedule/cron workflow yang tidak ada commit (dari user/bukan [skip ci])
-selama 60 hari. Commit workflow GAKH dihitung. Ini dijalankan tiap 25 hari oleh
-workflow Heartbeat."""
-import base64, json, os, sys, urllib.request
+# -*- coding: utf-8 -*-
+"""Heartbeat anti auto-disable.
+
+GitHub men-disable schedule/cron workflow jika tidak ada commit biasa
+(bukan commit dari GITHUB_TOKEN / bukan [skip ci]) selama 60 hari.
+Workflow daily-snapshot butuh dijangkarkan oleh commit tiap <=60 hari.
+
+Push file heartbeat.txt ke branch `heartbeat` (bukan main) -> repo dianggap
+aktif, tapi branch utama tetap bersih. Dipanggil workflow heartbeat.yml tiap
+25 hari dengan GH_TOKEN dari secret GITHUB_PAT."""
+import base64, datetime, json, os, sys, urllib.request, urllib.error
 
 API = "https://api.github.com"
-REPO = os.environ["GITHUB_REPOSITORY"]
-TOKEN = os.environ["GH_TOKEN"]
 
 
-def api(path, data=None, method=None):
+def gh(method, path, token, payload=None):
+    data = json.dumps(payload).encode() if payload is not None else None
     req = urllib.request.Request(
-        API + path,
-        data=json.dumps(data).encode() if data is not None else None,
-        method=method or ("GET" if data is None else "PUT"),
-        headers={"Authorization": "Bearer " + TOKEN,
+        API + path, data=data, method=method,
+        headers={"Authorization": "Bearer " + token,
                  "Accept": "application/vnd.github+json",
-                 "User-Agent": "heartbeat-action"},
-    )
-    return json.loads(urllib.request.urlopen(req, timeout=30).read())
+                 "Content-Type": "application/json",
+                 "User-Agent": "heartbeat-action"})
+    try:
+        return json.loads(urllib.request.urlopen(req, timeout=30).read())
+    except urllib.error.HTTPError as e:
+        sys.stderr.write(f"GitHub {method} {path} -> HTTP {e.code}: {e.read().decode(errors='replace')[:200]}\n")
+        raise
 
 
-# 1. pastikan branch heartbeat ada
-try:
-    ref = api(f"/repos/{REPO}/git/ref/heads/heartbeat")
-    sha_head = ref["object"]["sha"]
-except Exception:
-    base = api(f"/repos/{REPO}/git/ref/heads/main")["object"]["sha"]
-    api(f"/repos/{REPO}/git/refs", {"ref": "refs/heads/heartbeat", "sha": base}, "POST")
-    sha_head = base
+def main():
+    repo = os.environ.get("GITHUB_REPOSITORY") or sys.exit("GITHUB_REPOSITORY missing")
+    token = os.environ.get("GH_TOKEN") or sys.exit("GH_TOKEN missing")
 
-# 2. blob berisi timestamp
-blob = api(f"/repos/{REPO}/git/blobs", {
-    "content": base64.b64encode(
-        f"heartbeat {__import__('datetime').datetime.utcnow().isoformat()}Z\n".encode()
-    ).decode(),
-    "encoding": "base64",
-})
+    # pastikan branch heartbeat ada (buat dari default branch jika belum)
+    try:
+        gh("GET", f"/repos/{repo}/branches/heartbeat", token)
+    except urllib.error.HTTPError:
+        default = gh("GET", f"/repos/{repo}", token)["default_branch"]
+        sha = gh("GET", f"/repos/{repo}/git/ref/heads/{default}", token)["object"]["sha"]
+        try:
+            gh("POST", f"/repos/{repo}/git/refs", token,
+               {"ref": "refs/heads/heartbeat", "sha": sha})
+        except urllib.error.HTTPError:
+            pass  # race: sudah dibuat runner lain
 
-# 3. tree di atas HEAD heartbeat (file tunggal heartbeat.txt)
-tree = api(f"/repos/{REPO}/git/trees", {
-    "base_tree": sha_head,
-    "tree": [{"path": "heartbeat.txt", "mode": "100644", "type": "blob", "sha": blob["sha"]}],
-})
+    now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    body = {"message": f"chore: keep repo active {now}",
+            "content": base64.b64encode(f"heartbeat {now}\n".encode()).decode(),
+            "branch": "heartbeat"}
+    try:
+        cur = gh("GET", f"/repos/{repo}/contents/heartbeat.txt?ref=heartbeat", token)
+        if cur.get("sha"):
+            body["sha"] = cur["sha"]
+    except urllib.error.HTTPError:
+        pass  # file belum ada = create baru
+    out = gh("PUT", f"/repos/{repo}/contents/heartbeat.txt", token, body)
+    print(f"heartbeat push OK -> branch heartbeat @{out['commit']['sha'][:8]}")
 
-# 4. commit + update ref
-commit = api(f"/repos/{REPO}/git/commits", {
-    "message": f"chore: keep repo active {__import__('datetime').datetime.utcnow():%Y-%m-%d}",
-    "tree": tree["sha"],
-    "parents": [sha_head],
-})
-api(f"/repos/{REPO}/git/refs/heads/heartbeat",
-    {"sha": commit["sha"], "force": True}, "PATCH")
-print("heartbeat push OK:", commit["sha"][:8])
+
+if __name__ == "__main__":
+    main()
