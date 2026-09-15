@@ -2,7 +2,7 @@ name: vault-transcode
 
 # Encode HEVC untuk file di temp release:
 #   - dipicu record.yml (bitrate > 1.5 Mbps atau > 2GB) -> kirim HEVC saja
-#   - dipicu cocote_bot /trans7 lokal (file besar/bitrate tinggi dari RDP)
+#   - dipicu cocote_bot (file besar/bitrate tinggi dari RDP)
 # Setelah selesai: kirim hasil ke Telegram + HAPUS temp release.
 
 permissions:
