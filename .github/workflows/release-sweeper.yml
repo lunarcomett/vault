@@ -16,7 +16,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           now=$(date -u +%s)
-          gh api "repos/${{ github.repository }}/releases" --paginate             --jq ".[] | select(.tag_name|test(\"^(encode-src-|transcode-\")) or startswith(\"encode-src-\") or startswith(\"transcode-\")) | .tag_name + \" \" + .published_at" | while read -r tag pub; do
+          gh api "repos/${{ github.repository }}/releases" --paginate             --jq ".[] | select(.tag_name|test("^(encode-src-|transcode-|tmp-)")) || .tag_name + \" \" + .published_at" | while read -r tag pub; do
             ts=$(date -u -d "$pub" +%s 2>/dev/null || echo 0)
             age_h=$(( (now - ts) / 3600 ))
             if [ "$age_h" -ge 6 ]; then
