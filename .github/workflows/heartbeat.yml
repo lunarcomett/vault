@@ -1,11 +1,10 @@
 name: Heartbeat
-# Push commit ringan tiap 25 hari ke branch `heartbeat` supaya repo tetap
-# dianggap aktif -> schedule workflow (daily-snapshot) tidak auto-disable.
-# Catatan: commit oleh GITHUB_TOKEN tidak dihitung sebagai aktivitas, jadi
-# workflow ini pakai secret GITHUB_PAT (PAT milik akun, scope repo+workflow).
+# Push commit ringan ke branch `heartbeat` tiap 25 hari supaya repo tetap aktif
+# dan workflow schedule (daily-snapshot) tidak auto-di-disable GitHub setelah 60 hari.
+# Commit dari GITHUB_TOKEN TIDAK dihitung aktivitas -> pakai secret HB_PAT.
 on:
   schedule:
-    - cron: "0 0 */25 * *"
+    - cron: "30 2 1,26 * *"   # 09:30 WIB tgl 1 & 26
   workflow_dispatch:
 
 jobs:
@@ -15,5 +14,5 @@ jobs:
       - uses: actions/checkout@v4
       - name: Push heartbeat commit
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_PAT }}
+          GH_TOKEN: ${{ secrets.HB_PAT }}
         run: python3 scripts/heartbeat_commit.py
