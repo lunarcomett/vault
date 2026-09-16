@@ -285,12 +285,12 @@ if [ "$LIVE_MODE" = "1" ]; then
   # Denoise sangat ringan (siaran sering noisy), jaga detail wajah
   VF_LIVE="hqdn3d=0.8:0.6:2:2"
   # AQ lebih kuat + lookahead lebih panjang + mild deblock (ticker/logo lebih rapi)
-  X265_PARAMS="aq-mode=3:aq-strength=1.25:qcomp=0.72:rd=3:psy-rd=1.8:psy-rdoq=1.0:rc-lookahead=60:scenecut=40:deblock=-1,-1:sao=1:strong-intra-smoothing=1:bframes=6"
+  X265_PARAMS="aq-mode=3:aq-strength=1.25:qcomp=0.72:rd=3:psy-rd=1.8:psy-rdoq=1.0:rc-lookahead=80:scenecut=40:deblock=-1,-1:sao=1:strong-intra-smoothing=1:bframes=6"
   CHAT_ID="$CHAT_ID" TG_API_URL="$TG_API_URL" BOT_TOKEN="$BOT_TOKEN" python3 scripts/send_message.py \
     "📺 <b>Live-friendly ON</b> — ${LIVE_REASON}.\\nJaga tengah frame, hemat logo/ticker, denoise ringan. Target tetap ~1.3 Mbps." || true
 else
   echo "📺 Live mode OFF (konten general)"
-  X265_PARAMS="aq-mode=3:aq-strength=1.0:rd=3:psy-rd=1.5:psy-rdoq=1.0:rc-lookahead=40:scenecut=40"
+  X265_PARAMS="aq-mode=3:aq-strength=1.0:rd=3:psy-rd=1.5:psy-rdoq=1.0:rc-lookahead=80:scenecut=40"
 fi
 
 
