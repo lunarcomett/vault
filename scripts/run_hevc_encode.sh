@@ -311,7 +311,7 @@ fi
   -c:v libx265 -profile:v main10 -pix_fmt yuv420p10le \
   -crf ${HEVC_CRF} -preset ${HEVC_PRESET} -maxrate ${MAXRATE_K:-1450}k -bufsize ${BUFSIZE_K:-2900}k \
   -x265-params "${X265_PARAMS}" -tag:v hvc1 \
-  -c:a copy -progress pipe:3 "$HEVC_FILE" \
+  -map 0:v:0 -map 0:a? -c:a copy -progress pipe:3 "$HEVC_FILE" \
   3> >(while IFS='=' read -r k v; do
     if [ "$k" = "out_time_ms" ]; then
       ms=${v%.*}
@@ -405,7 +405,7 @@ if [ -s "$HEVC_FILE" ]; then
       -c:v libx265 -profile:v main10 -pix_fmt yuv420p10le \
       -crf ${CUR_CRF} -preset ${HEVC_PRESET} -maxrate ${MAXRATE_K:-1450}k -bufsize ${BUFSIZE_K:-2900}k \
       -x265-params "${X265_PARAMS:-aq-mode=3:aq-strength=1.0}" -tag:v hvc1 \
-      -c:a copy -progress pipe:3 "$HEVC_FILE" \
+      -map 0:v:0 -map 0:a? -c:a copy -progress pipe:3 "$HEVC_FILE" \
       3> >(while IFS='=' read -r k v; do
         if [ "$k" = "out_time_ms" ]; then
           ms=${v%.*}

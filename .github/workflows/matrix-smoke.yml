@@ -1,0 +1,137 @@
+name: vault-matrix-smoke
+
+# Offline harness only: synthetic 12s clip, no Telegram, no tokens, no real media.
+# Validates chunk handoff (artifact + sha256) and concat across two encode runners.
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+env:
+  TZ: Asia/Jakarta
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      matrix: ${{ steps.split.outputs.matrix }}
+      count: ${{ steps.split.outputs.count }}
+      source_duration: ${{ steps.split.outputs.source_duration }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install ffmpeg
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg
+          ffmpeg -version | head -1
+      - name: Generate synthetic clip (testsrc2 + sine)
+        run: |
+          mkdir -p /tmp/smoke-src
+          ffmpeg -hide_banner -y \
+            -f lavfi -i testsrc2=size=160x90:rate=12:duration=12 \
+            -f lavfi -i sine=frequency=1000:duration=12 \
+            -c:v libx264 -g 24 -pix_fmt yuv420p -c:a aac -shortest \
+            /tmp/smoke-src/smoke.mp4
+          ffprobe -v error -show_entries format=duration -of csv=p=0 /tmp/smoke-src/smoke.mp4
+      - name: Split via matrix prepare with tiny threshold
+        id: split
+        env:
+          ORIG_FILE: /tmp/smoke-src/smoke.mp4
+        run: python3 scripts/matrix_media.py prepare --input "$ORIG_FILE" --output-dir /tmp/matrix-input --threshold-seconds 1
+      - name: Require exactly two chunks
+        id: assert-two
+        env:
+          COUNT: ${{ steps.split.outputs.count }}
+        run: test "$COUNT" = "2"
+      - name: Upload smoke source chunks
+        uses: actions/upload-artifact@v4
+        with:
+          name: matrix-input
+          path: /tmp/matrix-input
+          retention-days: 1
+          if-no-files-found: error
+          compression-level: 0
+
+  encode:
+    name: Smoke encode chunk ${{ matrix.index }}
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install ffmpeg
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg
+          ffmpeg -version | head -1
+      - name: Download smoke source chunks
+        uses: actions/download-artifact@v4
+        with:
+          name: matrix-input
+          path: /tmp/matrix-input
+      - name: Select chunk and verify checksum
+        id: select
+        env:
+          CHUNK_INDEX: ${{ matrix.index }}
+        run: python3 scripts/matrix_media.py select --directory /tmp/matrix-input --index "$CHUNK_INDEX"
+      - name: Encode chunk with libx265 ultrafast main10
+        env:
+          ORIG: ${{ steps.select.outputs.ORIG_FILE }}
+        run: |
+          mkdir -p /tmp/smoke-encode
+          ffmpeg -hide_banner -y -i "$ORIG" \
+            -c:v libx265 -profile:v main10 -pix_fmt yuv420p10le -preset ultrafast \
+            -crf 28 -tag:v hvc1 -c:a copy /tmp/smoke-encode/smoke-chunk-hevc.mp4
+          ffprobe -v error -select_streams v:0 -show_entries stream=codec_name,profile -of csv=p=0 /tmp/smoke-encode/smoke-chunk-hevc.mp4
+      - name: Pack encoded chunk with checksum metadata
+        env:
+          CHUNK_INDEX: ${{ matrix.index }}
+          HEVC_FILE: /tmp/smoke-encode/smoke-chunk-hevc.mp4
+        run: python3 scripts/matrix_media.py pack --directory /tmp/matrix-input --index "$CHUNK_INDEX" --output-dir "/tmp/matrix-output-$CHUNK_INDEX"
+      - name: Upload smoke encoded chunk
+        uses: actions/upload-artifact@v4
+        with:
+          name: encoded-${{ matrix.index }}
+          path: /tmp/matrix-output-${{ matrix.index }}
+          retention-days: 1
+          if-no-files-found: error
+          compression-level: 0
+
+  finalize:
+    needs: [prepare, encode]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install ffmpeg
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg
+          ffmpeg -version | head -1
+      - name: Download all encoded chunks
+        uses: actions/download-artifact@v4
+        with:
+          pattern: encoded-*
+          merge-multiple: true
+          path: /tmp/matrix-encoded
+      - name: Concat chunks in order
+        run: |
+          mkdir -p /tmp/smoke-out
+          python3 scripts/matrix_media.py finalize --directory /tmp/matrix-encoded --output /tmp/smoke-out/smoke-h265-10bit.mp4
+      - name: Decode-null validate the joined smoke output
+        run: |
+          ffmpeg -hide_banner -v error -xerror -i /tmp/smoke-out/smoke-h265-10bit.mp4 -f null - 2>&1 | tee /tmp/smoke-decode.log
+          test ! -s /tmp/smoke-decode.log
