@@ -18,6 +18,8 @@ echo "🎞 Encoding HEVC 10-bit (preset=${HEVC_PRESET}, CRF ${HEVC_CRF}) dari or
 echo "📦 Original: $(ls -lh "$FILE" | awk '{print $5}')"
 
 source scripts/encode_policy.sh
+# Resolution-aware bitrate: 720p=1.4 Mbps, 1080p=2.5 Mbps
+detect_bitrate_profile "$FILE"
 REQ_DUR="${REQUESTED_DURATION}"
 SRC_DUR_INT="${DURATION_SEC}"
 case "$SRC_DUR_INT" in ''|*[!0-9]*) SRC_DUR_INT=0 ;; esac
