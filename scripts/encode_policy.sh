@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Encode size/bitrate policy — single source of truth for rusemeva-encode.
 # Source this file:  source scripts/encode_policy.sh
-# Constants target ~1.3 Mbps sweet spot @720p (1.0 too blurry; 2.0 too fat).
+# Resolution-aware: 720p=1.4 Mbps, 1080p=2.5 Mbps (similar perceptual quality).
 
+# Defaults for 720p (overridden by detect_bitrate_profile if ORIG_FILE set)
 : "${MAX_TOTAL_BPS:=1450000}"
 : "${TARGET_TOTAL_BPS:=1350000}"
 : "${MIN_TOTAL_BPS:=1200000}"
@@ -11,6 +12,37 @@
 : "${MAXRATE_K:=1450}"
 : "${BUFSIZE_K:=2900}"
 : "${ACCEPT_BPS:=1500000}"
+
+# detect_bitrate_profile FILE
+# Detects video height and sets MAX/TARGET/MIN/MAXRATE/BUFSIZE/ACCEPT accordingly.
+# 720p (<=720): 1.4 Mbps — lumayan, detail OK, hemat size.
+# 1080p (>720): 2.5 Mbps — lumayan, detail OK (similar perceptual quality).
+detect_bitrate_profile() {
+  local file="${1:-}"
+  [ -z "$file" ] || [ ! -f "$file" ] && return 0
+  local height
+  height=$(ffprobe -v error -select_streams v:0 -show_entries stream=height     -of default=noprint_wrappers=1:nokey=1 "$file" 2>/dev/null | head -1)
+  case "$height" in ''|*[!0-9]*) return 0 ;; esac
+  if [ "$height" -gt 720 ]; then
+    # 1080p or higher
+    MAX_TOTAL_BPS=2500000
+    TARGET_TOTAL_BPS=2300000
+    MIN_TOTAL_BPS=2000000
+    MAXRATE_K=2500
+    BUFSIZE_K=5000
+    ACCEPT_BPS=2600000
+    echo "Resolution: ${height}p -> 1080p profile (2.5 Mbps)"
+  else
+    # 720p or lower
+    MAX_TOTAL_BPS=1450000
+    TARGET_TOTAL_BPS=1350000
+    MIN_TOTAL_BPS=1200000
+    MAXRATE_K=1450
+    BUFSIZE_K=2900
+    ACCEPT_BPS=1500000
+    echo "Resolution: ${height}p -> 720p profile (1.4 Mbps)"
+  fi
+}
 
 # target_bytes DURATION_SEC ORIG_BYTES
 # -> prints integer bytes = min(90% orig, MAX_TOTAL_BPS * dur / 8)
@@ -88,13 +120,12 @@ accept_hevc() {
     echo "NEED_BETTER"
     return 1
   fi
-  # Toleransi +1% dari ACCEPT_BPS: 1.46 Mbps vs cap 1.45 = nyaris identik, jangan paksakan re-encode penuh
+  # Toleransi +1% dari ACCEPT_BPS
   if [ "$bps" -gt $(( ACCEPT_BPS * 101 / 100 )) ]; then
     echo "NEED_SMALLER"
     return 1
   fi
   if [ "$target" -gt 0 ] && [ "$bytes" -gt "$target" ]; then
-    # size over but bitrate OK: soft OK if bps within cap +1% (container overhead)
     if [ "$bps" -le $(( MAX_TOTAL_BPS * 101 / 100 )) ]; then
       echo "OK"
       return 0
