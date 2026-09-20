@@ -321,9 +321,9 @@ jobs:
           test -s "$HF"
           SPLIT=0
           SIZE=$(stat -c%s "$HF")
-          MAX=$((2*1024*1024*1024))
+          MAX=$((1995*1024*1024))
           if [ "$SIZE" -gt "$MAX" ]; then
-            echo "HEVC lebih dari 2GB -> split 1990M; preserve assembled HEVC"
+            echo "HEVC lebih dari 1995MB -> split 1990M; preserve assembled HEVC"
             split -b 1990M --numeric-suffixes=0 --suffix-length=3 "$HF" "${HF}.part-"
             SPLIT=1
           fi
